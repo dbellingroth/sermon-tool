@@ -1,0 +1,219 @@
+#!/bin/sh
+script_path=$(readlink "$0")
+script_directory=$(dirname "$script_path")
+source "$script_directory/functions.sh"
+
+env_file_found="false"
+if [ -f "$script_directory/sermon.env" ]; then source "$script_directory/sermon.env"; env_file_found="true"; fi
+if [ -f "~/.sermon_env" ]; then source "~/.sermon_env"; env_file_found="true"; fi
+
+if [ "$env_file_found" = "false" ]; then
+    echo "Keine Konfigurationsdatei gefunden"
+    exit 1
+fi
+
+OUTPUT_DIR=${OUTPUT_DIR:-"output"}
+
+# ---------- Parse command line arguments ----------
+while [[ $# > 0 ]]
+do
+key="$1"
+case $key in
+    -t|--title)
+    title="$2"
+    shift
+    ;;
+    -d|--description)
+    description="$2"
+    shift
+    ;;
+    -S|--speaker)
+    speaker="$2"
+    shift
+    ;;
+    -s|--slug)
+    slug="$2"
+    shift
+    ;;
+    -d|--date)
+    date="$2"
+    shift
+    ;;
+    --pdf)
+    pdf_input="$2"
+    shift
+    ;;
+    --pptx)
+    pptx_input="$2"
+    shift
+    ;;
+    -f|--file)
+    source $2
+    shift
+    ;;
+    *)
+        if [ -z "$input" ]; then
+            input="$1"
+        else
+            echo "Zu viele Parameter"
+            exit 1
+        fi
+    ;;
+esac
+shift
+done
+
+if [ -z "$input"]; then input="$(select_file "Wähle eine Audiodatei als Quelle")";fi
+
+if [ -z "$pdf_input"]
+then
+    dialog --yes-label "Ja" --no-label "Nein" --yesno "Möchtest du eine PDF-Datei hinzufügen?" 0 0
+    if [ $? -eq 0 ]; then pdf_input="$(select_file "Wähle eine PDF-Datei")";fi
+fi
+
+if [ -z "$pptx_input"]
+then
+    dialog --yes-label "Ja" --no-label "Nein" --yesno "Möchtest du eine PPTX-Datei hinzufügen?" 0 0
+    if [ $? -eq 0 ]; then pptx_input="$(select_file "Wähle eine PPTX-Datei")";fi
+fi
+
+if [ -z "$title" -o -n "$description" -o -n "$speaker" -o -n "$slug" ] ; then
+    form_values=$(dialog \
+    --nocancel \
+    --separate-widget $'\n' \
+    --form "Bitte gib die Predigtinformationen ein" 0 0 0 \
+	"Titel:"            1 1     "$title"	    1 15 50 100 \
+    "Beschreibung:"     2 1     "$description"	2 15 50 300 \
+    "Redner:"         3 1       "$speaker"	    3 15 50 100 \
+    "Basisdateiname:"   4 1     "$slug"	        4 15 50 100 \
+    3>&1 1>&2 2>&3 3>&-)
+    if [ $? -eq 255 ]; then clear; exit 1; fi 
+    title=$(echo "$form_values" | sed -n 1p)
+    description=$(echo "$form_values" | sed -n 2p)
+    speaker=$(echo "$form_values" | sed -n 3p)
+    slug=$(echo "$form_values" | sed -n 4p)
+fi
+
+if [ -n "$date"] ; then
+    date=$(dialog --nocancel --week-start Mo --date-format '%Y-%m-%d' --calendar "Bitte wähle das Predigtdatum" 0 0 0 3>&1 1>&2 2>&3 3>&-)
+    if [ $? -eq 255 ]; then clear; exit 1; fi 
+fi
+
+year=$(echo $date | sed -n 's/\([0-9]\{4\}\)-[0-9]\{2\}-[0-9]\{2\}/\1/p')
+
+clear
+
+echo "Lege Ausgabeverzeichnis \"$OUTPUT_DIR\" an"
+mkdir -p $OUTPUT_DIR
+
+echo "Schreibe Eingabedaten in Datei"
+echo 'input='\'$input\''
+pdf_input='\'$pdf_input\''
+pptx_input='\'$pptx_input\''
+title='\'$title\''
+description='\'$description\''
+speaker='\'$speaker\''
+date='\'$date\''
+slug='\'$slug\''
+' > $OUTPUT_DIR/$slug.txt
+
+name=$(basename "$input" | cut -d. -f1)
+echo "Analysiere Lautstärke..."
+loudness_json=$(ffmpeg -i "$input" -af loudnorm=I=-23:LRA=7:tp=-2:print_format=json -f null - 2>&1 >/dev/null | sed -n -e '/{/,$p')
+input_i=$(echo $loudness_json | jq -r '.["input_i"]')
+input_lra=$(echo $loudness_json | jq -r '.["input_lra"]')
+input_tp=$(echo $loudness_json | jq -r '.["input_tp"]')
+input_thresh=$(echo $loudness_json | jq -r '.["input_thresh"]')
+
+echo "Lade Coverbild herunter..."
+curl $COVER_URL -o cover.png 2> /dev/null
+
+echo "Konvertiere Dateien..."
+ffmpeg \
+    -hide_banner \
+    -loglevel warning \
+    -stats \
+    `# Input file` \
+    -i "$input" \
+    `# Cover art` \
+    -i cover.png \
+    -filter_complex "[0:a]loudnorm=linear=true:measured_I=$input_i:measured_LRA=$input_lra:measured_tp=$input_tp:measured_thresh=$input_thresh,asplit=4[aac_he][mp3][mp3_hq][opus]" \
+    `# M4A` \
+        -map '[aac_he]' \
+            -metadata title="$title" \
+            -metadata author="$speaker" \
+            -metadata artist="$speaker" \
+            -metadata performer="$speaker" \
+            -metadata album_artist="$PUBLISHER" \
+            -metadata year="$year" \
+            -metadata description="$description" \
+            -acodec libfdk_aac \
+            -profile:a aac_he_v2 \
+            -b:a 64k \
+            -movflags +faststart \
+        "$OUTPUT_DIR/${slug}.m4a" \
+    `# MP3 LQ` \
+        -map '[mp3]' \
+            -metadata title="$title" \
+            -metadata artist="$speaker" \
+            -metadata publisher="$PUBLISHER" \
+            -ac 1 \
+            -acodec mp3 \
+            -b:a 64k \
+        -map 1:0 \
+            -c:v png \
+            -id3v2_version 3 \
+            -metadata:s:v title="Album cover" \
+            -metadata:s:v comment="Cover (front)" \
+        "$OUTPUT_DIR/${slug}.mp3" \
+    `# MP3 HQ` \
+        -map '[mp3_hq]' \
+            -metadata title="$title" \
+            -metadata artist="$speaker" \
+            -metadata publisher="$PUBLISHER" \
+            -acodec mp3 \
+            -b:a 192k \
+        -map 1:0 \
+            -c:v png \
+            -id3v2_version 3 \
+            -metadata:s:v title="Album cover" \
+            -metadata:s:v comment="Cover (front)" \
+        "$OUTPUT_DIR/${slug}_hq.mp3" \
+    `# OPUS` \
+        -map '[opus]' \
+            -metadata title="$title" \
+            -metadata artist="$speaker" \
+            -metadata publisher="$PUBLISHER" \
+            -acodec opus \
+            -b:a 64k \
+            -strict -2 \
+        "$OUTPUT_DIR/${slug}.opus"
+
+echo "Füge Coverbild zur M4A-Datei hinzu"
+atomicparsley "$OUTPUT_DIR/${slug}.m4a" --overWrite --artwork cover.png
+
+echo "Entferne temporäres Coverbild"
+rm cover.png
+
+echo "Lade Mediendateien hoch..."
+echo "M4A"
+upload $OUTPUT_DIR/${slug}.m4a "$UPLOAD_DIR/${slug}.m4a" "audio/m4a"
+echo "MP3"
+upload $OUTPUT_DIR/${slug}.mp3 "$UPLOAD_DIR/${slug}.mp3" "audio/mpeg"
+echo "MP3 HQ"
+upload $OUTPUT_DIR/${slug}_hq.mp3 "$UPLOAD_DIR/${slug}_hq.mp3" "audio/mpeg"
+echo "OPUS"
+upload $OUTPUT_DIR/${slug}.opus "$UPLOAD_DIR/${slug}.opus" "audio/ogg; codecs=opus"
+
+if [ ! -z "$pdf_input" ]
+then
+echo "Lade PDF-Datei hoch..."
+upload "$pdf_input" "$UPLOAD_DIR/${slug}.pdf" "application/pdf"
+fi
+ 
+if [ ! -z "$pptx_input" ]
+then
+echo "Lade PPTX-Datei hoch..."
+upload "$pptx_input" "$UPLOAD_DIR/${slug}.pptx" "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+fi
+echo "Fertig"

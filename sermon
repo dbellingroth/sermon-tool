@@ -77,7 +77,7 @@ script_directory=$(dirname "$script_path")
 
 env_file_found="false"
 if [ -f "$script_directory/sermon.env" ]; then source "$script_directory/sermon.env"; env_file_found="true"; fi
-if [ -f "~/.sermon_env" ]; then source "~/.sermon_env"; env_file_found="true"; fi
+if [ -f "$HOME/.sermon_env" ]; then source "$HOME/.sermon_env"; env_file_found="true"; fi
 
 if [ "$env_file_found" = "false" ]; then
     echo "Keine Konfigurationsdatei gefunden"

@@ -44,7 +44,7 @@ select_file() {
         files=".. Ordner"
         for f in *; do
             files="$files \"$f\""
-            if [ -d $f]
+            if [ -d $f ]
             then
                 files="$files Ordner"
             else
